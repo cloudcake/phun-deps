@@ -2,10 +2,12 @@
 # and publishes it on a release Phun setup downloads from. MariaDB publishes
 # Linux and Windows builds only; Phun takes those from archive.mariadb.org.
 #
-# The build bundles its SSL (WolfSSL), PCRE2 and zlib and leaves out the
-# storage engines that need outside libraries (Mroonga, RocksDB, Connect,
-# OQGraph, Spider, ColumnStore, S3), so the server needs only what macOS
-# ships. The archive mirrors the Linux bintar: bin/, lib/, share/ and scripts/.
+# The build links a static OpenSSL built here (the client library has no
+# WolfSSL support and would otherwise take Homebrew's GnuTLS), bundles PCRE2
+# and zlib, and leaves out the storage engines that need outside libraries
+# (Mroonga, RocksDB, Connect, OQGraph, Spider, ColumnStore, S3), so every
+# binary and plugin needs only what macOS ships; Verify checks each one. The
+# archive mirrors the Linux bintar: bin/, lib/, share/ and scripts/.
 #
 # Manual only: run it from the Actions tab. Afterwards run Phun's
 # `scripts/pin-services.sh mariadb-<version>`.
@@ -40,6 +42,8 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
       MACOSX_DEPLOYMENT_TARGET: "12.0"
+      OPENSSL_VERSION: "3.5.9"
+      OPENSSL_SHA256: "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
     steps:
       - name: Source (checked)
         run: |
@@ -52,6 +56,17 @@ jobs:
       - name: Tools
         run: brew install bison cmake
 
+      - name: OpenSSL (static)
+        run: |
+          curl -fsSL --retry 3 -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz"
+          echo "$OPENSSL_SHA256  openssl.tar.gz" | shasum -a 256 -c -
+          tar -xzf openssl.tar.gz
+          cd "openssl-$OPENSSL_VERSION"
+          ./Configure no-shared no-tests no-docs --prefix="$RUNNER_TEMP/openssl" --libdir=lib
+          make -j"$(sysctl -n hw.ncpu)"
+          make install_sw
+
       - name: Configure
         run: |
           prefix="$(brew --prefix)"
@@ -60,7 +75,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/install" \
             -DCMAKE_IGNORE_PREFIX_PATH="$prefix;/usr/local;/opt/local" \
             -DBISON_EXECUTABLE="$(brew --prefix bison)/bin/bison" \
-            -DWITH_SSL=bundled \
+            -DWITH_SSL="$RUNNER_TEMP/openssl" \
             -DWITH_PCRE=bundled \
             -DWITH_ZLIB=bundled \
             -DWITH_LIBFMT=bundled \
@@ -101,14 +116,22 @@ jobs:
 
       - name: Verify
         run: |
+          trap 'echo "::error title=Verify failed::line $LINENO: $BASH_COMMAND"' ERR
           stage="$RUNNER_TEMP/stage"
           "$stage/bin/mariadbd" --version | grep -q "$VERSION"
-          for binary in "$stage/bin/mariadbd" "$stage/bin/mariadb" "$stage/bin/mariadb-dump"; do
-            otool -L "$binary"
-            if otool -L "$binary" | tail -n +2 | grep -vE '^\s+(/usr/lib|/System/Library|@rpath|@loader_path|@executable_path)/'; then
-              echo "$binary links a library outside macOS"; exit 1
-            fi
-          done
+          outside=0
+          while IFS= read -r binary; do
+            file -b "$binary" | grep -q '^Mach-O' || continue
+            own=$(otool -D "$binary" | tail -n +2)
+            for lib in $(otool -L "$binary" | tail -n +2 | awk '{print $1}'); do
+              [ "$lib" = "$own" ] && continue
+              case "$lib" in
+                /usr/lib/*|/System/Library/*|@rpath/*|@loader_path/*|@executable_path/*) ;;
+                *) echo "::error title=Links outside macOS::${binary#"$stage/"} links $lib"; outside=1 ;;
+              esac
+            done
+          done < <(find "$stage/bin" "$stage/lib" -type f)
+          [ "$outside" = 0 ]
           data="$RUNNER_TEMP/data"
           "$stage/scripts/mariadb-install-db" --no-defaults --basedir="$stage" --datadir="$data" \
             --auth-root-authentication-method=normal --skip-test-db
