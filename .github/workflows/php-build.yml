@@ -1,9 +1,11 @@
-# Builds Phun's PHP 8.4 / 8.5 (cli + fpm) from the php.net source with
+# Builds Phun's PHP 8.4 / 8.5 / 8.6 (cli + fpm) from the php.net source with
 # static-php-cli and publishes them on a public release that Phun setup
 # downloads from. Manual only: run it from the Actions tab.
 #
 # Publishes to this repo's Releases (tag php-<version>) with the built-in token.
 # After it finishes, run Phun's `scripts/pin-php.sh <tag>` for each version tag.
+# Leave a version empty to skip that minor. Untick publish for a test build
+# (a release candidate, say): the archives stay as run artifacts only.
 name: php-build
 
 on:
@@ -21,6 +23,19 @@ on:
       php85_sha256:
         description: SHA-256 of php-<php85>.tar.gz from php.net
         default: "81a0f450349e84b08eb43faa85f8a4c835684f3cc1c50471775d1317a046c525"
+      php86:
+        description: PHP 8.6 version (empty skips 8.6; 8.6.0RC7 for a release candidate)
+        default: ""
+      php86_sha256:
+        description: SHA-256 of php-<php86>.tar.gz
+        default: ""
+      php86_url:
+        description: Where php-<php86>.tar.gz is, when not php.net/distributions (release candidates are on downloads.php.net)
+        default: ""
+      publish:
+        description: Publish a release per version (untick for a test build)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -44,12 +59,28 @@ env:
   PHP_EXTENSIONS: "apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,event,exif,fileinfo,filter,ftp,gd,gmp,iconv,imagick,intl,mbstring,mbregex,memcached,mysqli,mysqlnd,opcache,openssl,opentelemetry,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      minors: ${{ steps.minors.outputs.minors }}
+    steps:
+      - id: minors
+        run: |
+          set -euo pipefail
+          minors=()
+          [ -n "${{ inputs.php84 }}" ] && minors+=('"8.4"')
+          [ -n "${{ inputs.php85 }}" ] && minors+=('"8.5"')
+          [ -n "${{ inputs.php86 }}" ] && minors+=('"8.6"')
+          [ "${#minors[@]}" -gt 0 ] || { echo "no PHP version given"; exit 1; }
+          echo "minors=[$(IFS=,; echo "${minors[*]}")]" >> "$GITHUB_OUTPUT"
+
   build:
     name: php-${{ matrix.minor }} ${{ matrix.platform }}
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        minor: ["8.4", "8.5"]
+        minor: ${{ fromJSON(needs.plan.outputs.minors) }}
         platform: [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64]
         include:
           - platform: linux-x86_64
@@ -65,13 +96,15 @@ jobs:
     steps:
       - name: Pick version
         run: |
-          if [ "${{ matrix.minor }}" = "8.4" ]; then
-            echo "PHP_VERSION=${{ inputs.php84 }}" >> "$GITHUB_ENV"
-            echo "PHP_SHA256=${{ inputs.php84_sha256 }}" >> "$GITHUB_ENV"
-          else
-            echo "PHP_VERSION=${{ inputs.php85 }}" >> "$GITHUB_ENV"
-            echo "PHP_SHA256=${{ inputs.php85_sha256 }}" >> "$GITHUB_ENV"
-          fi
+          case "${{ matrix.minor }}" in
+            8.4) v="${{ inputs.php84 }}"; sum="${{ inputs.php84_sha256 }}"; url="" ;;
+            8.5) v="${{ inputs.php85 }}"; sum="${{ inputs.php85_sha256 }}"; url="" ;;
+            8.6) v="${{ inputs.php86 }}"; sum="${{ inputs.php86_sha256 }}"; url="${{ inputs.php86_url }}" ;;
+          esac
+          [ -n "$sum" ] || { echo "no SHA-256 given for PHP $v"; exit 1; }
+          echo "PHP_VERSION=$v" >> "$GITHUB_ENV"
+          echo "PHP_SHA256=$sum" >> "$GITHUB_ENV"
+          echo "PHP_URL=${url:-https://www.php.net/distributions/php-$v.tar.gz}" >> "$GITHUB_ENV"
 
       - name: static-php-cli source
         run: |
@@ -82,8 +115,7 @@ jobs:
         working-directory: ${{ runner.temp }}/spc
         run: |
           mkdir -p downloads/php-src-in
-          curl -fsSL --retry 3 -o "downloads/php-src-in/php-$PHP_VERSION.tar.gz" \
-            "https://www.php.net/distributions/php-$PHP_VERSION.tar.gz"
+          curl -fsSL --retry 3 -o "downloads/php-src-in/php-$PHP_VERSION.tar.gz" "$PHP_URL"
           echo "$PHP_SHA256  downloads/php-src-in/php-$PHP_VERSION.tar.gz" | shasum -a 256 -c -
 
       - name: PHP + composer for spc (macOS)
@@ -159,6 +191,7 @@ jobs:
 
   publish:
     needs: build
+    if: inputs.publish
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -174,7 +207,8 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           cd dist
-          for v in "${{ inputs.php84 }}" "${{ inputs.php85 }}"; do
+          for v in "${{ inputs.php84 }}" "${{ inputs.php85 }}" "${{ inputs.php86 }}"; do
+            [ -n "$v" ] || continue
             tag="php-$v"
             files=(php-"$v"-*.tar.gz)
             [ "${#files[@]}" -eq 4 ] || { echo "$tag: expected 4 archives, got ${#files[@]}"; exit 1; }
