@@ -171,6 +171,18 @@ jobs:
             --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
           bin/spc-gnu-docker build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
+      # spc keeps configure and compiler output in its own log files, not
+      # the job log, so keep them when a build fails.
+      - name: Keep spc logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spc-logs-${{ matrix.minor }}-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/spc/log/
+            ${{ runner.temp }}/spc/source/php-src/config.log
+          if-no-files-found: ignore
+
       - name: Stage
         run: |
           src="$RUNNER_TEMP/spc/buildroot/bin"
