@@ -36,6 +36,11 @@ env:
   # which Laravel's Str::headline and Filament's labels fall over on.
   # memcached (with libmemcached) is what Laravel's memcached cache store
   # needs; the older memcache extension is not enough.
+  # nghttp2 gives libcurl HTTP/2, which Apple push (APNs) needs: Laravel's
+  # HTTP client refuses HTTP/2 requests without it ("libcurl 7.65.2 or newer
+  # built with HTTP/2 support is required"). Named on its own because the
+  # suggested libs stay off (see c-ares above).
+  PHP_LIBS: "nghttp2"
   PHP_EXTENSIONS: "apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,event,exif,fileinfo,filter,ftp,gd,gmp,iconv,imagick,intl,mbstring,mbregex,memcached,mysqli,mysqlnd,opcache,openssl,opentelemetry,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
 jobs:
@@ -98,7 +103,7 @@ jobs:
           bin/spc doctor --auto-fix
           bin/spc download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
             --custom-url "php-src:file://$PWD/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
-          bin/spc build "$PHP_EXTENSIONS" --build-cli --build-fpm
+          bin/spc build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
       # glibc build in spc's own container, so php can dlopen the bundled
       # pcov.so (a fully static musl php cannot load shared extensions).
@@ -110,7 +115,7 @@ jobs:
         run: |
           bin/spc-gnu-docker download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
             --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
-          bin/spc-gnu-docker build "$PHP_EXTENSIONS" --build-cli --build-fpm
+          bin/spc-gnu-docker build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
       - name: Stage
         run: |
@@ -136,6 +141,8 @@ jobs:
             || { echo "mbstring was built without mbregex (mb_split missing)"; exit 1; }
           "$RUNNER_TEMP/stage/sbin/php-fpm" -v
           if grep -aq "c-ares" "$php"; then echo "libcurl was built with c-ares"; exit 1; fi
+          "$php" -n -r '$c = curl_version(); exit(($c["features"] & CURL_VERSION_HTTP2) && version_compare($c["version"], "7.65.2", ">=") ? 0 : 1);' \
+            || { echo "libcurl was built without HTTP/2 (nghttp2)"; exit 1; }
 
       - name: Package
         run: |
