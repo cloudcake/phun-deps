@@ -123,9 +123,13 @@ jobs:
       # the lookup, so it uses the 8.4 disable_huge_page and macos_iconv
       # patches, and drop cli_checks.
       # PHP 8.6's configure refuses Libtool's --with-pic; it is --enable-pic.
-      # APCu's last PECL release (5.1.28) does not build against 8.6
-      # (php_verror lost an argument); its main branch does, so build a
-      # pinned commit of it.
+      # Extensions whose releases do not build against 8.6 yet (8.6 removed
+      # XtOffsetOf, zval_dtor, INI_STR and other old internal aliases):
+      # APCu, imagick, memcached and redis come from pinned commits of their
+      # main branches, which do; event from its 3.2.0 release, newer than the
+      # one spc pins. protobuf has no 8.6-ready version at all, so its
+      # 5.36.2 release is built with zval_dtor() renamed to
+      # zval_ptr_dtor_nogc(), the function it was an alias of.
       - name: static-php-cli for PHP 8.6
         if: matrix.minor == '8.6'
         working-directory: ${{ runner.temp }}/spc
@@ -135,7 +139,23 @@ jobs:
           perl -0pi -e "s/'84', '85'\]/'84', '85', '86']/" src/SPC/store/SourcePatcher.php
           perl -pi -e 's/^SPC_MICRO_PATCHES=cli_checks,/SPC_MICRO_PATCHES=/' config/env.ini
           perl -pi -e 's/^(SPC_CMD_PREFIX_PHP_CONFIGURE=.*) --with-pic"/$1 --enable-pic"/' config/env.ini
-          echo "SPC_EXTRA_SOURCES=--custom-url apcu:https://github.com/krakjoe/apcu/archive/fb2c942552a3f5dab7f4dea4afb5cf0831222c57.tar.gz" >> "$GITHUB_ENV"
+          {
+            printf 'SPC_EXTRA_SOURCES='
+            printf -- '--custom-url apcu:https://github.com/krakjoe/apcu/archive/fb2c942552a3f5dab7f4dea4afb5cf0831222c57.tar.gz '
+            printf -- '--custom-url ext-imagick:https://github.com/Imagick/imagick/archive/55ed2e9fda264395636a2e27e51f31673f5566ab.tar.gz '
+            printf -- '--custom-url memcached:https://github.com/php-memcached-dev/php-memcached/archive/0b52d3657140750fa0eddd20cdbfc6edc8fbdadd.tar.gz '
+            printf -- '--custom-url redis:https://github.com/phpredis/phpredis/archive/9b4b2ef6aa7537f16a3e37cf548a7ad533fa1e82.tar.gz '
+            printf -- '--custom-url ext-event:https://bitbucket.org/osmanov/pecl-event/get/3.2.0.tar.gz\n'
+          } >> "$GITHUB_ENV"
+          mkdir -p downloads/protobuf-86
+          curl -fsSL --retry 3 -o downloads/protobuf-86/src.tgz https://pecl.php.net/get/protobuf-5.36.2.tgz
+          tar -xzf downloads/protobuf-86/src.tgz -C downloads/protobuf-86
+          rm downloads/protobuf-86/src.tgz
+          grep -rl 'zval_dtor(' downloads/protobuf-86 | xargs perl -pi -e 's/\bzval_dtor\(/zval_ptr_dtor_nogc(/g'
+          if grep -rq 'zval_dtor(' downloads/protobuf-86; then echo "zval_dtor left in protobuf"; exit 1; fi
+          tar -czf downloads/protobuf-86.tgz -C downloads/protobuf-86 protobuf-5.36.2
+          rm -rf downloads/protobuf-86
+          echo "SPC_PROTOBUF_FILE=protobuf-86.tgz" >> "$GITHUB_ENV"
           grep -n "'86'" src/SPC/store/SourcePatcher.php
           grep -n "^SPC_MICRO_PATCHES\|^SPC_CMD_PREFIX_PHP_CONFIGURE" config/env.ini
 
@@ -163,7 +183,8 @@ jobs:
           composer install --no-dev --no-interaction --prefer-dist
           bin/spc doctor --auto-fix
           bin/spc download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
-            --custom-url "php-src:file://$PWD/downloads/php-src-in/php-$PHP_VERSION.tar.gz" $SPC_EXTRA_SOURCES --retry 3
+            --custom-url "php-src:file://$PWD/downloads/php-src-in/php-$PHP_VERSION.tar.gz" $SPC_EXTRA_SOURCES \
+            ${SPC_PROTOBUF_FILE:+--custom-url "protobuf:file://$PWD/downloads/$SPC_PROTOBUF_FILE"} --retry 3
           bin/spc build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
       # glibc build in spc's own container, so php can dlopen the bundled
@@ -175,7 +196,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           bin/spc-gnu-docker download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
-            --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" $SPC_EXTRA_SOURCES --retry 3
+            --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" $SPC_EXTRA_SOURCES \
+            ${SPC_PROTOBUF_FILE:+--custom-url "protobuf:file:///app/downloads/$SPC_PROTOBUF_FILE"} --retry 3
           bin/spc-gnu-docker build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
       # spc keeps configure and compiler output in its own log files, not
