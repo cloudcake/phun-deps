@@ -116,11 +116,16 @@ jobs:
         run: |
           git clone --depth 1 --branch "$SPC_VERSION" https://github.com/crazywhalecc/static-php-cli.git "$RUNNER_TEMP/spc"
 
-      # static-php-cli 2.8.5 predates PHP 8.6: its versioned phpmicro patch
-      # lookup stops at 8.5 (so 8.6 falls back to the 8.0 patches, which no
-      # longer apply), and cli_checks, a patch only phpmicro builds need, has
-      # no version that fits 8.6. Add 8.6 to the lookup, so it uses the 8.4
-      # disable_huge_page and macos_iconv patches, and drop cli_checks.
+      # static-php-cli 2.8.5 predates PHP 8.6:
+      # its versioned phpmicro patch lookup stops at 8.5 (so 8.6 falls back
+      # to the 8.0 patches, which no longer apply), and cli_checks, a patch
+      # only phpmicro builds need, has no version that fits 8.6. Add 8.6 to
+      # the lookup, so it uses the 8.4 disable_huge_page and macos_iconv
+      # patches, and drop cli_checks.
+      # PHP 8.6's configure refuses Libtool's --with-pic; it is --enable-pic.
+      # APCu's last PECL release (5.1.28) does not build against 8.6
+      # (php_verror lost an argument); its main branch does, so build a
+      # pinned commit of it.
       - name: static-php-cli for PHP 8.6
         if: matrix.minor == '8.6'
         working-directory: ${{ runner.temp }}/spc
@@ -129,8 +134,10 @@ jobs:
           grep -q "'84', '85']" src/SPC/store/SourcePatcher.php
           perl -0pi -e "s/'84', '85'\]/'84', '85', '86']/" src/SPC/store/SourcePatcher.php
           perl -pi -e 's/^SPC_MICRO_PATCHES=cli_checks,/SPC_MICRO_PATCHES=/' config/env.ini
+          perl -pi -e 's/^(SPC_CMD_PREFIX_PHP_CONFIGURE=.*) --with-pic"/$1 --enable-pic"/' config/env.ini
+          echo "SPC_EXTRA_SOURCES=--custom-url apcu:https://github.com/krakjoe/apcu/archive/fb2c942552a3f5dab7f4dea4afb5cf0831222c57.tar.gz" >> "$GITHUB_ENV"
           grep -n "'86'" src/SPC/store/SourcePatcher.php
-          grep -n "^SPC_MICRO_PATCHES" config/env.ini
+          grep -n "^SPC_MICRO_PATCHES\|^SPC_CMD_PREFIX_PHP_CONFIGURE" config/env.ini
 
       # Kept under downloads/, which spc-gnu-docker mounts at /app/downloads.
       - name: php.net source (checked)
@@ -156,7 +163,7 @@ jobs:
           composer install --no-dev --no-interaction --prefer-dist
           bin/spc doctor --auto-fix
           bin/spc download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
-            --custom-url "php-src:file://$PWD/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
+            --custom-url "php-src:file://$PWD/downloads/php-src-in/php-$PHP_VERSION.tar.gz" $SPC_EXTRA_SOURCES --retry 3
           bin/spc build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
       # glibc build in spc's own container, so php can dlopen the bundled
@@ -168,7 +175,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           bin/spc-gnu-docker download --with-php="${{ matrix.minor }}" --for-extensions="$PHP_EXTENSIONS" \
-            --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" --retry 3
+            --custom-url "php-src:file:///app/downloads/php-src-in/php-$PHP_VERSION.tar.gz" $SPC_EXTRA_SOURCES --retry 3
           bin/spc-gnu-docker build "$PHP_EXTENSIONS" --with-libs="$PHP_LIBS" --build-cli --build-fpm
 
       # spc keeps configure and compiler output in its own log files, not
