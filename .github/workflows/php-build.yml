@@ -4,7 +4,7 @@
 #
 # Publishes to this repo's Releases (tag php-<version>) with the built-in token.
 # After it finishes, run Phun's `scripts/pin-php.sh <tag>` for each version tag.
-# Leave a version empty to skip that minor. Untick publish for a test build
+# `minors` picks what to build ("8.6" alone, say). Untick publish for a test build
 # (a release candidate, say): the archives stay as run artifacts only.
 name: php-build
 
@@ -23,8 +23,11 @@ on:
       php85_sha256:
         description: SHA-256 of php-<php85>.tar.gz from php.net
         default: "81a0f450349e84b08eb43faa85f8a4c835684f3cc1c50471775d1317a046c525"
+      minors:
+        description: Which minors to build, space separated
+        default: "8.4 8.5"
       php86:
-        description: PHP 8.6 version (empty skips 8.6; 8.6.0RC7 for a release candidate)
+        description: PHP 8.6 version (8.6.0RC7 for a release candidate)
         default: ""
       php86_sha256:
         description: SHA-256 of php-<php86>.tar.gz
@@ -68,10 +71,13 @@ jobs:
         run: |
           set -euo pipefail
           minors=()
-          [ -n "${{ inputs.php84 }}" ] && minors+=('"8.4"')
-          [ -n "${{ inputs.php85 }}" ] && minors+=('"8.5"')
-          [ -n "${{ inputs.php86 }}" ] && minors+=('"8.6"')
-          [ "${#minors[@]}" -gt 0 ] || { echo "no PHP version given"; exit 1; }
+          for m in ${{ inputs.minors }}; do
+            case "$m" in
+              8.4|8.5|8.6) minors+=("\"$m\"") ;;
+              *) echo "unknown minor $m"; exit 1 ;;
+            esac
+          done
+          [ "${#minors[@]}" -gt 0 ] || { echo "no minor given"; exit 1; }
           echo "minors=[$(IFS=,; echo "${minors[*]}")]" >> "$GITHUB_OUTPUT"
 
   build:
@@ -109,6 +115,22 @@ jobs:
       - name: static-php-cli source
         run: |
           git clone --depth 1 --branch "$SPC_VERSION" https://github.com/crazywhalecc/static-php-cli.git "$RUNNER_TEMP/spc"
+
+      # static-php-cli 2.8.5 predates PHP 8.6: its versioned phpmicro patch
+      # lookup stops at 8.5 (so 8.6 falls back to the 8.0 patches, which no
+      # longer apply), and cli_checks, a patch only phpmicro builds need, has
+      # no version that fits 8.6. Add 8.6 to the lookup, so it uses the 8.4
+      # disable_huge_page and macos_iconv patches, and drop cli_checks.
+      - name: static-php-cli for PHP 8.6
+        if: matrix.minor == '8.6'
+        working-directory: ${{ runner.temp }}/spc
+        run: |
+          set -euo pipefail
+          grep -q "'84', '85']" src/SPC/store/SourcePatcher.php
+          perl -0pi -e "s/'84', '85'\]/'84', '85', '86']/" src/SPC/store/SourcePatcher.php
+          perl -pi -e 's/^SPC_MICRO_PATCHES=cli_checks,/SPC_MICRO_PATCHES=/' config/env.ini
+          grep -n "'86'" src/SPC/store/SourcePatcher.php
+          grep -n "^SPC_MICRO_PATCHES" config/env.ini
 
       # Kept under downloads/, which spc-gnu-docker mounts at /app/downloads.
       - name: php.net source (checked)
@@ -207,8 +229,12 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           cd dist
-          for v in "${{ inputs.php84 }}" "${{ inputs.php85 }}" "${{ inputs.php86 }}"; do
-            [ -n "$v" ] || continue
+          for m in ${{ inputs.minors }}; do
+            case "$m" in
+              8.4) v="${{ inputs.php84 }}" ;;
+              8.5) v="${{ inputs.php85 }}" ;;
+              8.6) v="${{ inputs.php86 }}" ;;
+            esac
             tag="php-$v"
             files=(php-"$v"-*.tar.gz)
             [ "${#files[@]}" -eq 4 ] || { echo "$tag: expected 4 archives, got ${#files[@]}"; exit 1; }
