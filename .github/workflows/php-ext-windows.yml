@@ -17,6 +17,9 @@
 name: php-ext-windows
 
 on:
+  # TEMPORARY: registers the workflow from this branch so it can be dispatched before merge.
+  push:
+    branches: [php-ext-windows]
   workflow_dispatch:
     inputs:
       php84:
@@ -69,6 +72,7 @@ env:
 
 jobs:
   plan:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       minors: ${{ steps.minors.outputs.minors }}
