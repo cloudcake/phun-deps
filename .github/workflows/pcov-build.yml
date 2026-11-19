@@ -1,0 +1,300 @@
+# Builds the pcov.so Phun bundles (resources/php-ext/pcov/pcov-<minor>-<os>-<arch>.so)
+# for each PHP minor and each platform php-build publishes, and checks that
+# each one loads into that platform's Phun PHP (php-build's release
+# php-<version>). Manual only: run it from the Actions tab, after php-build
+# has published the PHP versions given here.
+#
+# The way phun-source's scripts/build-xdebug.sh builds Xdebug: php.net
+# source of the same patch, configured only for its headers and phpize,
+# then pcov's phpize, configure and make. Phun's PHP is NTS and non-debug,
+# so a module built against the same patch's headers loads in it.
+# Linux builds run in manylinux2014 (CentOS 7, glibc 2.17), the same base as
+# static-php-cli's spc-gnu-docker that builds Phun's Linux PHP, so the .so
+# needs nothing newer than that PHP does. macOS builds target macOS 12.0,
+# static-php-cli's MACOSX_DEPLOYMENT_TARGET.
+#
+# Publishes one release (tag pcov-1.0.12[-f04029f]-<date> unless given) with
+# pcov-<minor>-<os>-<arch>.so and a SHA256SUMS. Untick publish for a test
+# build: the files stay as run artifacts only.
+name: pcov-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      php84:
+        description: PHP 8.4 version (php-build's release php-<version> must exist)
+        default: "8.4.28"
+      php84_sha256:
+        description: SHA-256 of php-<php84>.tar.gz from php.net
+        default: "deffc88c60fcfb99f683a9f6689e9c91cf41b7cba50bd5f01a232a98c27f2cd4"
+      php85:
+        description: PHP 8.5 version
+        default: "8.5.13"
+      php85_sha256:
+        description: SHA-256 of php-<php85>.tar.gz from php.net
+        default: "3aeb20a7e667e197929747f76047409196f91f0172357439319cba344df8b3e1"
+      php86:
+        description: PHP 8.6 version
+        default: "8.6.0"
+      php86_sha256:
+        description: SHA-256 of php-<php86>.tar.gz from php.net
+        default: "62337dccde3d9fcc39797d4529f42637613036eaf3875353c206874e5813a3c1"
+      minors:
+        description: Which minors to build, space separated
+        default: "8.4 8.5 8.6"
+      tag:
+        description: Release tag (empty for pcov-1.0.12[-f04029f]-<UTC date>)
+        default: ""
+      publish:
+        description: Publish a release (untick for a test build)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CURL: curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors
+  # manylinux2014 (CentOS 7, glibc 2.17, devtoolset-10 gcc), pinned by digest.
+  MANYLINUX_X86_64: quay.io/pypa/manylinux2014_x86_64:2026.11.07-1@sha256:62eeff30ef134a85ec0f97109e008a319b0315ca5e8a6d754ee771556c02622a
+  MANYLINUX_AARCH64: quay.io/pypa/manylinux2014_aarch64:2026.11.07-1@sha256:101d2292840109c9d329fcfcd7b89b46f59e19ca23cbfdcf059fb389994665fc
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      minors: ${{ steps.minors.outputs.minors }}
+    steps:
+      - id: minors
+        run: |
+          set -euo pipefail
+          minors=()
+          for m in ${{ inputs.minors }}; do
+            case "$m" in
+              8.4|8.5|8.6) minors+=("\"$m\"") ;;
+              *) echo "unknown minor $m"; exit 1 ;;
+            esac
+          done
+          [ "${#minors[@]}" -gt 0 ] || { echo "no minor given"; exit 1; }
+          echo "minors=[$(IFS=,; echo "${minors[*]}")]" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: pcov php-${{ matrix.minor }} ${{ matrix.platform }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.plan.outputs.minors) }}
+        platform: [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64]
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - platform: macos-aarch64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      MINOR: ${{ matrix.minor }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      # pcov 1.0.12 for 8.4 and 8.5. It does not build against 8.6 (it uses
+      # INI_STR, which 8.6 removed), and there is no 8.6-ready release, so
+      # 8.6 uses the fix from its open pull request krakjoe/pcov#134, the
+      # same commit php-ext-windows builds.
+      - name: Pick versions
+        run: |
+          set -euo pipefail
+          case "$MINOR" in
+            8.4) v="${{ inputs.php84 }}"; sum="${{ inputs.php84_sha256 }}" ;;
+            8.5) v="${{ inputs.php85 }}"; sum="${{ inputs.php85_sha256 }}" ;;
+            8.6) v="${{ inputs.php86 }}"; sum="${{ inputs.php86_sha256 }}" ;;
+          esac
+          [ -n "$v" ] && [ -n "$sum" ] || { echo "no PHP $MINOR version or SHA-256 given"; exit 1; }
+          case "$v" in "$MINOR".*) ;; *) echo "PHP $v is not a $MINOR release"; exit 1 ;; esac
+          if [ "$MINOR" = 8.6 ]; then
+            pv=f04029f
+            purl=https://github.com/krakjoe/pcov/archive/f04029fa86ae58c6dfff8049de8433669dbf1394.tar.gz
+            psum=9b348c832fe670623ca9e7c8592b2846fdec7fc11799115db0a569f6a6739908
+          else
+            pv=1.0.12
+            purl=https://pecl.php.net/get/pcov-1.0.12.tgz
+            psum=23255c8c9335a9636ccb743f5302436a97a582a0bbde9869485be911bbc15da8
+          fi
+          {
+            echo "PHP_VERSION=$v"
+            echo "PHP_SHA256=$sum"
+            echo "PCOV_VERSION=$pv"
+            echo "PCOV_URL=$purl"
+            echo "PCOV_SHA256=$psum"
+            echo "W=$RUNNER_TEMP/w"
+            echo "SO=pcov-$MINOR-$PLATFORM.so"
+          } >> "$GITHUB_ENV"
+
+      - name: Sources (checked)
+        run: |
+          set -euo pipefail
+          mkdir -p "$W/src/php" "$W/src/pcov" dist
+          $CURL -o "$W/php.tar.gz" "https://www.php.net/distributions/php-$PHP_VERSION.tar.gz"
+          echo "$PHP_SHA256  $W/php.tar.gz" | shasum -a 256 -c -
+          $CURL -o "$W/pcov.tgz" "$PCOV_URL"
+          echo "$PCOV_SHA256  $W/pcov.tgz" | shasum -a 256 -c -
+          tar -xzf "$W/php.tar.gz" -C "$W/src/php" --strip-components=1
+          tar -xzf "$W/pcov.tgz" -C "$W/src/pcov"
+          cfg=$(find "$W/src/pcov" -maxdepth 2 -name config.m4 | head -1)
+          [ -n "$cfg" ] || { echo "pcov has no config.m4"; exit 1; }
+          mv "$(dirname "$cfg")" "$W/pcov"
+
+      - name: Build script
+        run: |
+          set -euo pipefail
+          cat > "$W/build.sh" <<'EOF'
+          set -euo pipefail
+          w="$1"
+          jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+          cd "$w/src/php"
+          ./configure --prefix="$w/prefix" --disable-all --disable-cgi --disable-phpdbg --without-pear >/dev/null
+          make install-headers install-build install-programs >/dev/null
+          cd "$w/pcov"
+          "$w/prefix/bin/phpize"
+          ./configure --with-php-config="$w/prefix/bin/php-config" --enable-pcov >/dev/null
+          make -j"$jobs"
+          cp modules/pcov.so "$w/pcov.so"
+          EOF
+          cat "$W/build.sh"
+
+      - name: Build (Linux, manylinux2014)
+        if: startsWith(matrix.platform, 'linux-')
+        run: |
+          set -euo pipefail
+          case "$PLATFORM" in
+            linux-x86_64) image="$MANYLINUX_X86_64" ;;
+            linux-aarch64) image="$MANYLINUX_AARCH64" ;;
+          esac
+          docker run --rm -v "$W:$W" "$image" bash -c "ldd --version | head -1; gcc --version | head -1; autoconf --version | head -1; bash $W/build.sh $W"
+
+      - name: Build (macOS)
+        if: startsWith(matrix.platform, 'macos-')
+        run: |
+          set -euo pipefail
+          command -v autoconf >/dev/null || brew install autoconf
+          bash "$W/build.sh" "$W"
+
+      - name: Stage
+        run: |
+          set -euo pipefail
+          cp "$W/pcov.so" "dist/$SO"
+          ls -l dist
+          file "dist/$SO"
+
+      # Phun's own PHP for this platform, from php-build's release, checked
+      # against that release's SHA256SUMS.
+      - name: Phun PHP (checked)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="php-$PHP_VERSION"
+          gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 \
+            || { echo "$REPO has no release $tag yet: run php-build for PHP $PHP_VERSION first"; exit 1; }
+          mkdir -p "$W/phun-php"
+          cd "$W/phun-php"
+          gh release download "$tag" --repo "$REPO" -p "php-$PHP_VERSION-$PLATFORM.tar.gz" -p SHA256SUMS
+          grep " php-$PHP_VERSION-$PLATFORM.tar.gz\$" SHA256SUMS | shasum -a 256 -c -
+          tar -xzf "php-$PHP_VERSION-$PLATFORM.tar.gz"
+          bin/php -v
+
+      - name: Verify
+        run: |
+          set -euo pipefail
+          php="$W/phun-php/bin/php"
+          so="$GITHUB_WORKSPACE/dist/$SO"
+          smoke='\pcov\start(); $x = 1; \pcov\stop(); $c = \pcov\collect(); if (!is_array($c)) exit(1); echo "pcov ", phpversion("pcov"), " collect ok\n";'
+          check() {
+            out=$("$@" -n -d display_startup_errors=1 -d error_reporting=-1 -d "extension=$so" -m 2>&1)
+            echo "$out" | grep -qx pcov || { echo "$out"; echo "pcov did not load"; exit 1; }
+            if echo "$out" | grep -qiE 'warning|error|cannot|unable'; then echo "$out"; exit 1; fi
+            "$@" -n -d "extension=$so" -d pcov.enabled=1 -r "$smoke"
+          }
+          check "$php"
+          case "$PLATFORM" in
+            linux-*)
+              # Also on the oldest glibc Phun's Linux PHP runs on.
+              case "$PLATFORM" in
+                linux-x86_64) image="$MANYLINUX_X86_64" ;;
+                linux-aarch64) image="$MANYLINUX_AARCH64" ;;
+              esac
+              docker run --rm -v "$W:$W" -v "$GITHUB_WORKSPACE/dist:$GITHUB_WORKSPACE/dist" "$image" bash -c "
+                set -e; ldd --version | head -1
+                $php -n -d extension=$so -m | grep -x pcov
+                $php -n -d extension=$so -d pcov.enabled=1 -r '$smoke'"
+              newest=$(objdump -T "$so" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -V | tail -1)
+              echo "newest glibc symbol version: ${newest:-none}"
+              if [ -n "$newest" ] && [ "$(printf '%s\n' "$newest" 2.17 | sort -V | tail -1)" != 2.17 ]; then
+                echo "$SO needs glibc $newest, newer than 2.17"; exit 1
+              fi
+              ;;
+            macos-*)
+              otool -l "$so" | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX' | grep -E 'minos|version'
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pcov-${{ matrix.minor }}-${{ matrix.platform }}
+          path: dist/*.so
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          files=()
+          notes="pcov.so for Phun's PHP (php-build), NTS:"
+          for m in ${{ inputs.minors }}; do
+            case "$m" in
+              8.4) v="${{ inputs.php84 }}"; pv=1.0.12 ;;
+              8.5) v="${{ inputs.php85 }}"; pv=1.0.12 ;;
+              8.6) v="${{ inputs.php86 }}"; pv="1.0.12 + krakjoe/pcov#134 (f04029f)" ;;
+            esac
+            notes="$notes PHP $m (built against $v): pcov $pv;"
+            for p in linux-x86_64 linux-aarch64 macos-aarch64 macos-x86_64; do
+              f="pcov-$m-$p.so"
+              [ -f "$f" ] || { echo "no $f"; exit 1; }
+              files+=("$f")
+            done
+          done
+          if [ -z "$TAG" ]; then
+            TAG="pcov-1.0.12"
+            case " ${{ inputs.minors }} " in *" 8.6 "*) TAG="$TAG-f04029f" ;; esac
+            TAG="$TAG-$(date -u +%Y%m%d)"
+          fi
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "$TAG already exists on $REPO; delete it first to rebuild"; exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" --repo "$REPO" --title "$TAG" --latest=false \
+            --notes "$notes Linux built on manylinux2014 (glibc 2.17), macOS for 12.0+. Each was loaded into php-build's PHP for its platform." \
+            "${files[@]}" SHA256SUMS

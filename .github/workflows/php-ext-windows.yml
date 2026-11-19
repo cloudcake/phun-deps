@@ -150,7 +150,7 @@ jobs:
             $out = "$env:W\dl\$name"
             $ok = $false
             foreach ($base in 'https://windows.php.net/downloads/releases', 'https://windows.php.net/downloads/releases/archives') {
-              & curl.exe -fsSL --retry 3 -o $out "$base/$name"
+              & curl.exe -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o $out "$base/$name"
               if ($LASTEXITCODE -eq 0) { $ok = $true; break }
             }
             if (-not $ok) { throw "download failed: $name" }
@@ -204,7 +204,7 @@ jobs:
           New-Item -ItemType Directory -Force "$env:W\deps", "$env:W\pkgs" | Out-Null
           foreach ($p in $pkgs) {
             $out = "$env:W\dl\$($p.f)"
-            & curl.exe -fsSL --retry 3 -o $out "$($p.u)/$($p.f)"
+            & curl.exe -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o $out "$($p.u)/$($p.f)"
             if ($LASTEXITCODE -ne 0) { throw "download failed: $($p.u)/$($p.f)" }
             $got = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
             if ($got -ne $p.s) { throw "$($p.f) SHA-256 is $got, expected $($p.s)" }
@@ -260,7 +260,7 @@ jobs:
           $exts = @()
           foreach ($e in $src) {
             $out = "$env:W\dl\ext-$($e.n)-$($e.v).tgz"
-            & curl.exe -fsSL --retry 3 -o $out $e.u
+            & curl.exe -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o $out $e.u
             if ($LASTEXITCODE -ne 0) { throw "download failed: $($e.u)" }
             $got = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
             if ($got -ne $e.s) { throw "$($e.u) SHA-256 is $got, expected $($e.s)" }
