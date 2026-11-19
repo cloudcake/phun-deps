@@ -17,9 +17,6 @@
 name: php-ext-windows
 
 on:
-  # TEMPORARY: registers the workflow from this branch so it can be dispatched before merge.
-  push:
-    branches: [php-ext-windows]
   workflow_dispatch:
     inputs:
       php84:
@@ -72,7 +69,6 @@ env:
 
 jobs:
   plan:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       minors: ${{ steps.minors.outputs.minors }}
@@ -283,6 +279,16 @@ jobs:
               }
             }
             if (Get-ChildItem $pb -Recurse -Include *.c, *.h | Select-String -Pattern '\bzval_dtor\(' -List) { throw "zval_dtor left in protobuf" }
+            # The 8.6 pcov passes ZEND_STRL() (two arguments in one) to
+            # strncasecmp, which PHP's Windows headers define as a
+            # three-argument macro; MSVC's conforming preprocessor, which
+            # PHP 8.6 builds with, rejects that. Spell the lengths out.
+            $pc = ($exts | Where-Object { $_.name -eq 'pcov' }).dir
+            $f = "$pc\pcov.c"
+            $t = [IO.File]::ReadAllText($f)
+            $t2 = [regex]::Replace($t, 'strncasecmp\(\s*(\w+)\s*,\s*ZEND_STRL\(\s*("[^"]*")\s*\)\s*\)', 'strncasecmp($1, $2, sizeof($2) - 1)')
+            if ($t2 -ne $t) { [IO.File]::WriteAllText($f, $t2, $utf8); Write-Host "patched strncasecmp(ZEND_STRL) in pcov.c" }
+            if ($t2 -match 'strncasecmp\([^;]*ZEND_STRL') { throw "strncasecmp(ZEND_STRL) left in pcov" }
           }
           ConvertTo-Json -InputObject $exts -Depth 3 | Set-Content "$env:W\exts.json"
           Get-Content "$env:W\exts.json"
