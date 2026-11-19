@@ -1,0 +1,563 @@
+# Builds the PHP extensions Phun's Linux/macOS PHP has built in (php-build's
+# PHP_EXTENSIONS, plus the pcov and Xdebug it bundles) that the official
+# windows.php.net NTS x64 zip lacks, from source with the PHP SDK against the
+# matching php.net devel pack, and publishes them per PHP version. Manual only:
+# run it from the Actions tab.
+#
+# Everything else on that list is already in the official zip, built into
+# php8.dll or as ext\php_*.dll; the Verify step proves it with `php -m`.
+# pcntl, posix, sysvmsg and sysvsem do not exist on Windows: php-src has no
+# config.w32 for them, only config.m4.
+#
+# Publishes to this repo's Releases (tag php-ext-windows-<version>) with the
+# built-in token: one php-ext-<version>-windows-x86_64.zip laid out like the PHP
+# install it goes over (ext\php_*.dll, the libraries they need beside php.exe)
+# and a SHA256SUMS. Untick publish for a test build: the archive stays a run
+# artifact only.
+name: php-ext-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      php84:
+        description: PHP 8.4 version, as windows.php.net names it (8.4.28, or 8.4.28-1 for a rebuild)
+        default: "8.4.28"
+      php84_sha256:
+        description: SHA-256 of php-<php84>-nts-Win32-vs17-x64.zip (windows.php.net sha256sum.txt)
+        default: "c1f9280588b7b6ad7b518969022f0b0175f106fab9d0639ad0e4ce7cd47ac1ed"
+      php84_devel_sha256:
+        description: SHA-256 of php-devel-pack-<php84>-nts-Win32-vs17-x64.zip
+        default: "45e6f70df9ee04c9aaa6349e8aa0b7990dfabbee05b3bc6d9fd591bdfc2d4b82"
+      php85:
+        description: PHP 8.5 version
+        default: "8.5.13"
+      php85_sha256:
+        description: SHA-256 of php-<php85>-nts-Win32-vs17-x64.zip
+        default: "4ae6c72bc0ca4f6b8f3e9b107874bae0135699f3aabe6c26a1f6103d040eea97"
+      php85_devel_sha256:
+        description: SHA-256 of php-devel-pack-<php85>-nts-Win32-vs17-x64.zip
+        default: "62fe45db847a0e659d03d80871afbfe4661d8758299495c4770235870b17d7f1"
+      php86:
+        description: PHP 8.6 version
+        default: "8.6.0"
+      php86_sha256:
+        description: SHA-256 of php-<php86>-nts-Win32-vs18-x64.zip
+        default: "d4783fffe1f4ab072600daff1622a7a2df936957a787a338c59e3dbd4d846d98"
+      php86_devel_sha256:
+        description: SHA-256 of php-devel-pack-<php86>-nts-Win32-vs18-x64.zip
+        default: "895120fe16aad81340c3dd3e928e55d4c198e7b86906e8e48089711559717e52"
+      minors:
+        description: Which minors to build, space separated
+        default: "8.4 8.5 8.6"
+      publish:
+        description: Publish a release per version (untick for a test build)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  # php-build.yml's list; Verify checks every one of them loads on Windows.
+  PHP_EXTENSIONS: "apcu,bcmath,bz2,calendar,ctype,curl,dba,dom,event,exif,fileinfo,filter,ftp,gd,gmp,iconv,imagick,intl,mbstring,mbregex,memcached,mysqli,mysqlnd,opcache,openssl,opentelemetry,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+  # No config.w32 in php-src: Unix process control and System V IPC only.
+  UNIX_ONLY: "pcntl,posix,sysvmsg,sysvsem"
+  # Built here, in load order (event needs the official sockets loaded first).
+  BUILT: "apcu,redis,imagick,memcached,event,protobuf,opentelemetry,pcov,xdebug"
+  PHP_SDK_TAG: "php-sdk-2.9.0"
+  PHP_SDK_COMMIT: "81b356186db123ce9cd65149cee4683211a59ebd"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      minors: ${{ steps.minors.outputs.minors }}
+    steps:
+      - id: minors
+        run: |
+          set -euo pipefail
+          minors=()
+          for m in ${{ inputs.minors }}; do
+            case "$m" in
+              8.4|8.5|8.6) minors+=("\"$m\"") ;;
+              *) echo "unknown minor $m"; exit 1 ;;
+            esac
+          done
+          [ "${#minors[@]}" -gt 0 ] || { echo "no minor given"; exit 1; }
+          echo "minors=[$(IFS=,; echo "${minors[*]}")]" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: php-${{ matrix.minor }} windows-x86_64
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ${{ fromJSON(needs.plan.outputs.minors) }}
+        # The official zips are built with Visual Studio 2022 (vs17) for 8.4
+        # and 8.5 and Visual Studio 2026 (vs18) for 8.6; build each with the
+        # same one. windows-2025-vs2026 is GitHub's image with VS 2026.
+        include:
+          - minor: "8.4"
+            runner: windows-2022
+            vs: vs17
+          - minor: "8.5"
+            runner: windows-2022
+            vs: vs17
+          - minor: "8.6"
+            runner: windows-2025-vs2026
+            vs: vs18
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      MINOR: ${{ matrix.minor }}
+      VS: ${{ matrix.vs }}
+      IN_PHP84: ${{ inputs.php84 }}
+      IN_PHP84_SHA256: ${{ inputs.php84_sha256 }}
+      IN_PHP84_DEVEL_SHA256: ${{ inputs.php84_devel_sha256 }}
+      IN_PHP85: ${{ inputs.php85 }}
+      IN_PHP85_SHA256: ${{ inputs.php85_sha256 }}
+      IN_PHP85_DEVEL_SHA256: ${{ inputs.php85_devel_sha256 }}
+      IN_PHP86: ${{ inputs.php86 }}
+      IN_PHP86_SHA256: ${{ inputs.php86_sha256 }}
+      IN_PHP86_DEVEL_SHA256: ${{ inputs.php86_devel_sha256 }}
+    steps:
+      - name: Pick version
+        run: |
+          $n = $env:MINOR -replace '\.', ''
+          $v = [Environment]::GetEnvironmentVariable("IN_PHP$n")
+          $sum = [Environment]::GetEnvironmentVariable("IN_PHP${n}_SHA256")
+          $dsum = [Environment]::GetEnvironmentVariable("IN_PHP${n}_DEVEL_SHA256")
+          if (-not $v) { throw "no PHP $env:MINOR version given" }
+          if ($v -notmatch "^$([regex]::Escape($env:MINOR))\.\d+(-\d+)?$") { throw "PHP version $v is not a $env:MINOR release" }
+          if (-not $sum -or -not $dsum) { throw "no SHA-256 given for PHP $v" }
+          "PHP_VERSION=$v" >> $env:GITHUB_ENV
+          "PHP_SHA256=$sum" >> $env:GITHUB_ENV
+          "PHP_DEVEL_SHA256=$dsum" >> $env:GITHUB_ENV
+          "W=$env:RUNNER_TEMP\w" >> $env:GITHUB_ENV
+
+      - name: PHP zip and devel pack (checked)
+        run: |
+          New-Item -ItemType Directory -Force "$env:W\dl" | Out-Null
+          function Get-Release([string]$name, [string]$sha) {
+            $out = "$env:W\dl\$name"
+            $ok = $false
+            foreach ($base in 'https://windows.php.net/downloads/releases', 'https://windows.php.net/downloads/releases/archives') {
+              & curl.exe -fsSL --retry 3 -o $out "$base/$name"
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            }
+            if (-not $ok) { throw "download failed: $name" }
+            $got = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $sha.ToLower()) { throw "$name SHA-256 is $got, expected $sha" }
+            Write-Host "$got  $name"
+            return $out
+          }
+          $zip = Get-Release "php-$env:PHP_VERSION-nts-Win32-$env:VS-x64.zip" $env:PHP_SHA256
+          $dev = Get-Release "php-devel-pack-$env:PHP_VERSION-nts-Win32-$env:VS-x64.zip" $env:PHP_DEVEL_SHA256
+          Expand-Archive $zip -DestinationPath "$env:W\php"
+          Expand-Archive $dev -DestinationPath "$env:W\devel-x"
+          $inner = Get-ChildItem "$env:W\devel-x" -Directory | Select-Object -First 1
+          Move-Item $inner.FullName "$env:W\devel"
+          if (-not (Test-Path "$env:W\devel\phpize.bat")) { throw "no phpize.bat in the devel pack" }
+          Get-ChildItem "$env:W\php\ext" -Filter *.dll | ForEach-Object Name
+
+      - name: PHP SDK
+        run: |
+          git clone --quiet --depth 1 --branch $env:PHP_SDK_TAG https://github.com/php/php-sdk-binary-tools.git "$env:W\sdk"
+          $head = git -C "$env:W\sdk" rev-parse HEAD
+          if ($head -ne $env:PHP_SDK_COMMIT) { throw "$env:PHP_SDK_TAG is $head, expected $env:PHP_SDK_COMMIT" }
+          if (-not (Test-Path "$env:W\sdk\phpsdk-$($env:VS)-x64.bat")) { throw "the PHP SDK has no $env:VS starter" }
+
+      # The libraries the official PECL Windows DLLs are built against, from
+      # windows.php.net's own dependency store. There are no vs18 builds of
+      # ImageMagick, libmemcached, libevent or pthreads, so 8.6 links the
+      # vs17/vs16/vc15 ones: MSVC 2015 to 2026 (v140 to v145) share one ABI
+      # and runtime (VCRUNTIME140), and an older toolset's libraries link into
+      # a newer one's builds. OpenSSL and zlib are the ones the PHP zip of
+      # that minor is built with (windows.php.net deps series files), so
+      # php_event uses the zip's own libssl/libcrypto.
+      - name: Dependencies (checked)
+        run: |
+          $pecl = 'https://downloads.php.net/~windows/pecl/deps'
+          $sdk = "https://downloads.php.net/~windows/php-sdk/deps/$env:VS/x64"
+          $pkgs = @(
+            @{ f = 'ImageMagick-7.1.1-47-vs17-x64.zip'; u = $pecl; s = 'ae568e87eae7bf7b0b61042d89ead0c86a6b3112c685d5d92c47595df3753c18' },
+            @{ f = 'libmemcached-1.1.4-vs16-x64.zip'; u = $pecl; s = 'd64aff6162f874394b11b649a6d05ee53cf5454595adf23d1b9f7493e26dd692' },
+            @{ f = 'libevent-2.1.8-2-vc15-x64.zip'; u = $pecl; s = 'd88bfeceefcd229669664689c7e269bc76b0942cc3c09b650120e4ed38236321' },
+            @{ f = 'pthreads-2.11.0-vs16-x64.zip'; u = $pecl; s = '1ab60367d2a88ea4fae57261cd949e9089db965edf3af50f1e6d4a4a848c8a79' }
+          )
+          switch ($env:MINOR) {
+            '8.4' { $pkgs += @{ f = 'openssl-3.0.22.pl2-vs17-x64.zip'; u = $sdk; s = '3bc1b788fa192ec455d6502e6067a581c64f6f9ba1db538e5d2aebc2c3a55977' }
+                    $pkgs += @{ f = 'zlib-1.4-vs17-x64.zip'; u = $sdk; s = '60020bf729ad6a2a8674d83120ffda3fb82e42aa78f8576b730a829ea215f5cb' } }
+            '8.5' { $pkgs += @{ f = 'openssl-3.5.9-vs17-x64.zip'; u = $sdk; s = '889b08e67ff0f7aae59f58619f4f73da7b4998ae2b6f96e1a4b0acaf89d6c280' }
+                    $pkgs += @{ f = 'zlib-1.4-vs17-x64.zip'; u = $sdk; s = '60020bf729ad6a2a8674d83120ffda3fb82e42aa78f8576b730a829ea215f5cb' } }
+            '8.6' { $pkgs += @{ f = 'openssl-4.0.3-vs18-x64.zip'; u = $sdk; s = '4b551372b43e3d5f88ca931349a74236d0b9ba97f983d7f9a7bfee69f6b9370c' }
+                    $pkgs += @{ f = 'zlib-1.4-vs18-x64.zip'; u = $sdk; s = 'a04de4c1796805f94472ab179024faf027b87cf841cf0717b5123ac985b30fc1' } }
+          }
+          New-Item -ItemType Directory -Force "$env:W\deps", "$env:W\pkgs" | Out-Null
+          foreach ($p in $pkgs) {
+            $out = "$env:W\dl\$($p.f)"
+            & curl.exe -fsSL --retry 3 -o $out "$($p.u)/$($p.f)"
+            if ($LASTEXITCODE -ne 0) { throw "download failed: $($p.u)/$($p.f)" }
+            $got = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $p.s) { throw "$($p.f) SHA-256 is $got, expected $($p.s)" }
+            Write-Host "$got  $($p.f)"
+            $dir = "$env:W\pkgs\$([IO.Path]::GetFileNameWithoutExtension($p.f))"
+            Expand-Archive $out -DestinationPath $dir
+            robocopy $dir "$env:W\deps" /E /NFL /NDL /NJH /NJS /NP | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "robocopy failed for $($p.f)" }
+          }
+          $global:LASTEXITCODE = 0
+
+      # Releases the Linux/macOS builds use. 8.4 and 8.5: the PECL releases
+      # static-php-cli 2.8.5 builds (event 3.1.4 and protobuf 5.34.1 are its
+      # pins). 8.6: php-build's 8.6-ready commits and releases, the same
+      # zval_dtor rename for protobuf 5.36.2, pcov from its open PHP 8.6 pull
+      # request (krakjoe/pcov#134: 1.0.12 uses INI_STR, which 8.6 removed)
+      # and Xdebug 3.6.0alpha1 (3.5.x refuses PHP 8.6 in its config.w32).
+      - name: Extension sources (checked)
+        run: |
+          $pecl = 'https://pecl.php.net/get'
+          $gh = 'https://github.com'
+          $conf = @{
+            apcu = '--enable-apcu'; redis = '--enable-redis --enable-redis-session'; imagick = '--with-imagick'
+            memcached = '--enable-memcached --enable-memcached-session --enable-memcached-json'
+            event = '--with-event'; protobuf = '--enable-protobuf'; opentelemetry = '--enable-opentelemetry'
+            pcov = '--enable-pcov'; xdebug = '--with-xdebug'
+          }
+          if ($env:MINOR -eq '8.6') {
+            $src = @(
+              @{ n = 'apcu'; v = 'fb2c942'; u = "$gh/krakjoe/apcu/archive/fb2c942552a3f5dab7f4dea4afb5cf0831222c57.tar.gz"; s = '7f9d03dfabaf5961021c529f48a61386b73cd697cbacd410008ec32bc2d038c6' },
+              @{ n = 'redis'; v = '9b4b2ef'; u = "$gh/phpredis/phpredis/archive/9b4b2ef6aa7537f16a3e37cf548a7ad533fa1e82.tar.gz"; s = '7f98fe44050e9958f0cc525241be4562e0c7bc45d03a14b90a250a71ebacc693' },
+              @{ n = 'imagick'; v = '55ed2e9'; u = "$gh/Imagick/imagick/archive/55ed2e9fda264395636a2e27e51f31673f5566ab.tar.gz"; s = '81a24f34334cb620ea16ed563afdc3b61b60ab321f2d817dd0412a8f20ddedf6' },
+              @{ n = 'memcached'; v = '0b52d36'; u = "$gh/php-memcached-dev/php-memcached/archive/0b52d3657140750fa0eddd20cdbfc6edc8fbdadd.tar.gz"; s = '464238bc82b70dde84b8ae40bf4bb466281b976e545fd67b8ab2af83bd0b1448' },
+              @{ n = 'event'; v = '3.2.0'; u = "$pecl/event-3.2.0.tgz"; s = 'fb3d4e3c9fdc79125274f2b46461492923edec6b489ed7077973f7e65f41dc1c' },
+              @{ n = 'protobuf'; v = '5.36.2'; u = "$pecl/protobuf-5.36.2.tgz"; s = 'f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b' },
+              @{ n = 'opentelemetry'; v = '1.5.0'; u = "$pecl/opentelemetry-1.5.0.tgz"; s = '796676e071b2c6502c4dbdacccd1a2b29e12bf81d5d514b7ba85ce37de232073' },
+              @{ n = 'pcov'; v = 'f04029f'; u = "$gh/krakjoe/pcov/archive/f04029fa86ae58c6dfff8049de8433669dbf1394.tar.gz"; s = '9b348c832fe670623ca9e7c8592b2846fdec7fc11799115db0a569f6a6739908' },
+              @{ n = 'xdebug'; v = '3.6.0alpha1'; u = "$gh/xdebug/xdebug/archive/653e0443683790877b99e4e7a8adedf84b8e298b.tar.gz"; s = '526696b80adfbbb9908df90710a1735807bc52eb01c607bff8ba5473059fd687' }
+            )
+          } else {
+            $src = @(
+              @{ n = 'apcu'; v = '5.1.28'; u = "$pecl/apcu-5.1.28.tgz"; s = 'ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf' },
+              @{ n = 'redis'; v = '6.3.0'; u = "$pecl/redis-6.3.0.tgz"; s = '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5' },
+              @{ n = 'imagick'; v = '3.8.1'; u = "$pecl/imagick-3.8.1.tgz"; s = '3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed864352ee' },
+              @{ n = 'memcached'; v = '3.4.0'; u = "$pecl/memcached-3.4.0.tgz"; s = 'c163434eb0da97c8f45c7ad41d979d381f8b81c49402b1b90b063987fb37972e' },
+              @{ n = 'event'; v = '3.1.4'; u = "$pecl/event-3.1.4.tgz"; s = '5c4caa73bc2dceee31092ff9192139df28e9a80f1147ade0dfe869db2e4ddfd3' },
+              @{ n = 'protobuf'; v = '5.34.1'; u = "$pecl/protobuf-5.34.1.tgz"; s = '153c321122a6d51107530fc04a0ff26bed0637442af61198fe30a02369c3dc9e' },
+              @{ n = 'opentelemetry'; v = '1.5.0'; u = "$pecl/opentelemetry-1.5.0.tgz"; s = '796676e071b2c6502c4dbdacccd1a2b29e12bf81d5d514b7ba85ce37de232073' },
+              @{ n = 'pcov'; v = '1.0.12'; u = "$pecl/pcov-1.0.12.tgz"; s = '23255c8c9335a9636ccb743f5302436a97a582a0bbde9869485be911bbc15da8' },
+              @{ n = 'xdebug'; v = '3.5.3'; u = "$pecl/xdebug-3.5.3.tgz"; s = 'f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d' }
+            )
+          }
+          $exts = @()
+          foreach ($e in $src) {
+            $out = "$env:W\dl\ext-$($e.n)-$($e.v).tgz"
+            & curl.exe -fsSL --retry 3 -o $out $e.u
+            if ($LASTEXITCODE -ne 0) { throw "download failed: $($e.u)" }
+            $got = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $e.s) { throw "$($e.u) SHA-256 is $got, expected $($e.s)" }
+            Write-Host "$got  $($e.n) $($e.v)"
+            $x = "$env:W\x\$($e.n)"
+            New-Item -ItemType Directory -Force $x | Out-Null
+            tar -xzf $out -C $x
+            if ($LASTEXITCODE -ne 0) { throw "could not unpack $out" }
+            $cfg = Get-ChildItem $x -Recurse -Filter config.w32 | Sort-Object { $_.FullName.Length } | Select-Object -First 1
+            if (-not $cfg) { throw "$($e.n) has no config.w32" }
+            $exts += [ordered]@{ name = $e.n; version = $e.v; url = $e.u; dir = $cfg.DirectoryName; args = $conf[$e.n] }
+          }
+          if ($env:MINOR -eq '8.6') {
+            $pb = ($exts | Where-Object { $_.name -eq 'protobuf' }).dir
+            $utf8 = [Text.UTF8Encoding]::new($false)
+            Get-ChildItem $pb -Recurse -Include *.c, *.h | ForEach-Object {
+              $t = [IO.File]::ReadAllText($_.FullName)
+              if ($t -match '\bzval_dtor\(') {
+                [IO.File]::WriteAllText($_.FullName, ($t -replace '\bzval_dtor\(', 'zval_ptr_dtor_nogc('), $utf8)
+                Write-Host "patched zval_dtor in $($_.Name)"
+              }
+            }
+            if (Get-ChildItem $pb -Recurse -Include *.c, *.h | Select-String -Pattern '\bzval_dtor\(' -List) { throw "zval_dtor left in protobuf" }
+          }
+          ConvertTo-Json -InputObject $exts -Depth 3 | Set-Content "$env:W\exts.json"
+          Get-Content "$env:W\exts.json"
+
+      - name: Build
+        run: |
+          $exts = Get-Content "$env:W\exts.json" | ConvertFrom-Json
+          $sdk = "$env:W\sdk\phpsdk-$($env:VS)-x64.bat"
+          New-Item -ItemType Directory -Force "$env:W\built" | Out-Null
+          foreach ($e in $exts) {
+            Write-Host "::group::$($e.name) $($e.version)"
+            $bat = "$env:W\build-$($e.name).bat"
+            @(
+              '@echo on',
+              "cd /d `"$($e.dir)`" || exit /b 1",
+              "call `"$env:W\devel\phpize.bat`" || exit /b 1",
+              "call configure.bat --with-php-build=`"$env:W\deps`" $($e.args) || exit /b 1",
+              'nmake /nologo || exit /b 1'
+            ) | Set-Content -Encoding ascii $bat
+            & $sdk -t $bat
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) { throw "$($e.name) $($e.version) failed to build (exit $code)" }
+            $dll = Get-ChildItem $e.dir -Recurse -Filter "php_$($e.name).dll" | Where-Object { $_.DirectoryName -match '\\x64\\Release$' } | Select-Object -First 1
+            if (-not $dll) { throw "no php_$($e.name).dll from the $($e.name) build" }
+            Copy-Item $dll.FullName "$env:W\built\"
+          }
+          Get-ChildItem "$env:W\built"
+
+      - name: Keep build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ matrix.minor }}-windows-x86_64
+          path: |
+            ${{ runner.temp }}/w/x/**/config.nice.bat
+            ${{ runner.temp }}/w/x/**/config.log
+            ${{ runner.temp }}/w/x/**/Makefile
+          if-no-files-found: ignore
+
+      # ext\ gets the extension DLLs; the libraries they load go beside
+      # php.exe, where Windows looks for them (and where the official zip
+      # keeps its own, like libssl). Libraries are found by walking each
+      # DLL's imports with dumpbin: anything the PHP zip already has is left
+      # out, anything from the dependency store goes in. ImageMagick's coder
+      # modules (IM_MOD_RL_*) are loaded at run time, not imported, so all of
+      # its DLLs go in, as in the official PECL imagick zip.
+      - name: Stage
+        run: |
+          $stage = "$env:W\stage"
+          $php = "$env:W\php"
+          New-Item -ItemType Directory -Force "$stage\ext", "$stage\licenses" | Out-Null
+          Copy-Item "$env:W\built\*.dll" "$stage\ext\"
+          $im = Get-ChildItem "$env:W\pkgs" -Directory -Filter 'ImageMagick-*' | Select-Object -First 1
+          Copy-Item "$($im.FullName)\bin\*.dll" "$stage\"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin not found" }
+          $queue = [Collections.Generic.Queue[string]]::new()
+          Get-ChildItem $stage -Recurse -Filter *.dll | ForEach-Object { $queue.Enqueue($_.FullName) }
+          $system = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+          while ($queue.Count -gt 0) {
+            $f = $queue.Dequeue()
+            $deps = & $dumpbin /nologo /dependents $f | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[\w.+-]+\.dll$' }
+            foreach ($d in $deps) {
+              if ((Test-Path "$stage\$d") -or (Test-Path "$stage\ext\$d") -or (Test-Path "$php\$d") -or (Test-Path "$php\ext\$d")) { continue }
+              if (Test-Path "$env:W\deps\bin\$d") {
+                Copy-Item "$env:W\deps\bin\$d" "$stage\"
+                Write-Host "ship $d (for $(Split-Path $f -Leaf))"
+                $queue.Enqueue("$stage\$d")
+              } else {
+                [void]$system.Add($d)
+              }
+            }
+          }
+          Write-Host "Left to Windows (system and VC++ runtime): $($system -join ', ')"
+          $unknown = $system | Where-Object { $_ -notmatch '^(api-ms-win-|ext-ms-win-)' -and -not (Test-Path "$env:SystemRoot\System32\$_") }
+          if ($unknown) { throw "imports found nowhere: $($unknown -join ', ')" }
+          # Licences: each extension's, and each library's that ships or is linked in.
+          $exts = Get-Content "$env:W\exts.json" | ConvertFrom-Json
+          foreach ($e in $exts) {
+            $l = "$stage\licenses\$($e.name)"
+            New-Item -ItemType Directory -Force $l | Out-Null
+            Get-ChildItem $e.dir -File | Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING)' } | Copy-Item -Destination $l
+          }
+          foreach ($p in Get-ChildItem "$env:W\pkgs" -Directory) {
+            $lic = Get-ChildItem $p.FullName -Recurse -File | Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING)(\.\w+)?$' }
+            if ($p.Name -match '^(openssl|zlib)-') { continue }  # the PHP zip's own
+            if ($p.Name -match '^pthreads-' -and -not (Test-Path "$stage\pthreadVC2.dll")) { continue }
+            $l = "$stage\licenses\$($p.Name)"
+            New-Item -ItemType Directory -Force $l | Out-Null
+            $lic | Copy-Item -Destination $l
+          }
+          # What is in here and how PHP loads it.
+          $lines = @(
+            "; PHP extensions for PHP $env:PHP_VERSION NTS x64 (windows.php.net $env:VS build), built by cloudcake/phun-deps.",
+            '; Unpack over the PHP install: ext\php_*.dll into ext\, the other DLLs beside php.exe.',
+            '; event needs the official sockets extension loaded before it.'
+          )
+          foreach ($e in $exts) {
+            $lines += "; $($e.name) $($e.version) ($($e.url))"
+          }
+          $lines += 'extension=sockets'
+          foreach ($e in $exts) {
+            if ($e.name -eq 'xdebug') { $lines += 'zend_extension=xdebug' } else { $lines += "extension=$($e.name)" }
+          }
+          $lines | Set-Content -Encoding ascii "$stage\php-ext.ini"
+          Get-Content "$stage\php-ext.ini"
+          Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName.Substring($stage.Length + 1) }
+
+      # The official PHP with the staged files over it, and a PATH of only
+      # the PHP directory and Windows, so a library the runner happens to
+      # have elsewhere cannot hide one missing from the archive.
+      - name: Verify
+        run: |
+          $t = "$env:W\test"
+          Copy-Item "$env:W\php" $t -Recurse
+          Copy-Item "$env:W\stage\*" $t -Recurse -Force
+          $env:PATH = "$t;$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+          Set-Location $t
+          $base = @('-n', '-d', "extension_dir=$t\ext", '-d', 'display_startup_errors=1', '-d', 'display_errors=1', '-d', 'error_reporting=-1')
+          function Invoke-Php([string[]]$a) {
+            $ErrorActionPreference = 'Continue'
+            $out = & "$t\php.exe" @base @a 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host $out
+            if ($code -ne 0) { throw "php $($a -join ' ') exited $code" }
+            if ($out -match '(?i)warning|unable to|cannot load|fatal|error|deprecated') { throw "php $($a -join ' ') printed an error" }
+            return $out
+          }
+          $v = (Invoke-Php @('-v'))
+          $want = $env:PHP_VERSION -replace '-\d+$', ''
+          if ($v -notmatch "PHP $([regex]::Escape($want)) \(cli\)") { throw "php -v is not PHP $want" }
+          if ($v -notmatch 'NTS') { throw "php is not NTS" }
+
+          # Each built extension alone, with a check that it works.
+          New-Item -ItemType Directory -Force "$env:W\checks" | Out-Null
+          $checks = [ordered]@{
+            apcu = @(@('-d', 'extension=apcu', '-d', 'apc.enable_cli=1'), @'
+          <?php apcu_store('k', 42); if (apcu_fetch('k') !== 42) exit(1); echo apcu_cache_info(true)['memory_type'], "\n";
+          '@)
+            redis = @(@('-d', 'extension=redis'), @'
+          <?php if (!class_exists('Redis') || !class_exists('RedisCluster') || !class_exists('RedisSentinel')) exit(1);
+          echo phpversion('redis'), "\n";
+          '@)
+            imagick = @(@('-d', 'extension=imagick'), @'
+          <?php $i = new Imagick(); $i->newImage(4, 3, new ImagickPixel('red')); $i->setImageFormat('png');
+          $b = $i->getImageBlob(); if (substr($b, 1, 3) !== 'PNG') exit(1);
+          $j = new Imagick(); $j->readImageBlob($b); if ($j->getImageWidth() !== 4) exit(1);
+          foreach (['PNG', 'JPEG', 'GIF', 'WEBP', 'SVG'] as $f) { if (!Imagick::queryFormats($f)) { echo "no $f\n"; exit(1); } }
+          $j->setImageFormat('jpeg'); if (substr($j->getImageBlob(), 0, 2) !== "\xFF\xD8") exit(1);
+          echo Imagick::getVersion()['versionString'], "\n";
+          '@)
+            memcached = @(@('-d', 'extension=memcached'), @'
+          <?php $m = new Memcached(); if (!$m->addServer('127.0.0.1', 11211)) exit(1);
+          if (!Memcached::HAVE_JSON) exit(1); if (ini_get('memcached.sess_prefix') === false) exit(1);
+          echo phpversion('memcached'), "\n";
+          '@)
+            event = @(@('-d', 'extension=sockets', '-d', 'extension=event'), @'
+          <?php $b = new EventBase(); $fired = false;
+          $e = Event::timer($b, function () use (&$fired) { $fired = true; }); $e->addTimer(0.01); $b->loop();
+          if (!$fired) exit(1);
+          foreach (['EventSslContext', 'EventHttp', 'EventDnsBase', 'EventListener'] as $c) { if (!class_exists($c)) { echo "no $c\n"; exit(1); } }
+          echo phpversion('event'), "\n";
+          '@)
+            protobuf = @(@('-d', 'extension=protobuf'), @'
+          <?php if (!class_exists('Google\Protobuf\Internal\Message', false)) exit(1); echo phpversion('protobuf'), "\n";
+          '@)
+            opentelemetry = @(@('-d', 'extension=opentelemetry'), @'
+          <?php function f() { return 1; } $n = 0;
+          OpenTelemetry\Instrumentation\hook(null, 'f', function () use (&$n) { $n++; });
+          f(); if ($n !== 1) exit(1); echo phpversion('opentelemetry'), "\n";
+          '@)
+            pcov = @(@('-d', 'extension=pcov', '-d', 'pcov.enabled=1'), @'
+          <?php \pcov\start(); $x = 1; \pcov\stop(); if (!is_array(\pcov\collect())) exit(1); echo phpversion('pcov'), "\n";
+          '@)
+            xdebug = @(@('-d', 'zend_extension=xdebug', '-d', 'xdebug.mode=develop'), @'
+          <?php if (!function_exists('xdebug_info') || !in_array('develop', xdebug_info('mode'))) exit(1); echo phpversion('xdebug'), "\n";
+          '@)
+          }
+          foreach ($n in $checks.Keys) {
+            Write-Host "::group::$n"
+            $file = "$env:W\checks\$n.php"
+            $checks[$n][1] | Set-Content -Encoding utf8NoBOM $file
+            Invoke-Php ($checks[$n][0] + @('-m')) | Out-Null
+            Invoke-Php ($checks[$n][0] + @($file)) | Out-Null
+            Write-Host "::endgroup::"
+          }
+          $xv = Invoke-Php @('-d', 'zend_extension=xdebug', '-v')
+          if ($xv -notmatch 'with Xdebug') { throw "Xdebug did not load as a Zend extension" }
+
+          # Everything together: the whole of php-build's list, less the
+          # Unix-only ones, plus pcov and Xdebug.
+          $unix = $env:UNIX_ONLY -split ','
+          $built = $env:BUILT -split ','
+          $want = $env:PHP_EXTENSIONS -split ',' | Where-Object { $_ -notin $unix -and $_ -ne 'mbregex' }
+          $want = @($want) + @('pcov', 'xdebug') | Select-Object -Unique
+          $ini = @("extension_dir=`"$t\ext`"", 'apc.enable_cli=1')
+          $table = @()
+          foreach ($n in $want | Where-Object { $_ -notin $built }) {
+            if (Test-Path "$t\ext\php_$n.dll") {
+              $ini += $(if ($n -eq 'opcache') { "zend_extension=$n" } else { "extension=$n" })
+              $table += "$n`tofficial ext\php_$n.dll"
+            } else {
+              $table += "$n`tofficial, built in"
+            }
+          }
+          foreach ($n in $built) {
+            $ini += $(if ($n -eq 'xdebug') { "zend_extension=$n" } else { "extension=$n" })
+            $table += "$n`tbuilt here"
+          }
+          foreach ($n in $unix) { $table += "$n`tnot on Windows" }
+          $ini | Set-Content -Encoding ascii "$env:W\all.ini"
+          $table | ForEach-Object { Write-Host $_ }
+          $m = Invoke-Php @('-c', "$env:W\all.ini", '-m')
+          $have = $m -split "`r?`n" | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -and $_ -notmatch '^\[' }
+          $missing = @()
+          foreach ($n in $want) {
+            $name = $(if ($n -eq 'opcache') { 'zend opcache' } else { $n })
+            if ($name -notin $have) { $missing += $n }
+          }
+          if ($missing) { throw "missing modules: $($missing -join ', ')" }
+          $mb = "$env:W\checks\mbregex.php"
+          '<?php exit(function_exists("mb_split") && function_exists("mb_ereg") ? 0 : 1);' | Set-Content -Encoding ascii $mb
+          Invoke-Php @('-c', "$env:W\all.ini", $mb) | Out-Null
+          foreach ($n in $checks.Keys) {
+            Invoke-Php @('-c', "$env:W\all.ini", '-d', 'pcov.enabled=1', '-d', 'xdebug.mode=develop', "$env:W\checks\$n.php") | Out-Null
+          }
+          Write-Host "all $($want.Count) modules load together"
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = "php-ext-$env:PHP_VERSION-windows-x86_64.zip"
+          Push-Location "$env:W\stage"
+          7z a -tzip -mx=9 "$env:GITHUB_WORKSPACE\dist\$name" * | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z failed" }
+          Pop-Location
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: php-ext-${{ matrix.minor }}-windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Release per version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          for m in ${{ inputs.minors }}; do
+            case "$m" in
+              8.4) v="${{ inputs.php84 }}" ;;
+              8.5) v="${{ inputs.php85 }}" ;;
+              8.6) v="${{ inputs.php86 }}" ;;
+            esac
+            tag="php-ext-windows-$v"
+            file="php-ext-$v-windows-x86_64.zip"
+            [ -f "$file" ] || { echo "$tag: no $file"; exit 1; }
+            if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+              echo "$tag already exists on $REPO; delete it first to rebuild"; exit 1
+            fi
+            sha256sum "$file" > SHA256SUMS
+            cat SHA256SUMS
+            gh release create "$tag" --repo "$REPO" --title "PHP $v extensions for Windows" \
+              --notes "PECL extensions for the official windows.php.net PHP $v NTS x64 build (apcu, redis, imagick, memcached, event, protobuf, opentelemetry, pcov, xdebug), built from source with the PHP SDK against the php.net devel pack. Unpack over the PHP install; php-ext.ini lists the load lines and versions." \
+              "$file" SHA256SUMS
+          done
