@@ -11,8 +11,10 @@
 #
 # Publishes to this repo's Releases (tag php-ext-windows-<version>) with the
 # built-in token: one php-ext-<version>-windows-x86_64.zip laid out like the PHP
-# install it goes over (ext\php_*.dll, the libraries they need beside php.exe)
-# and a SHA256SUMS. Untick publish for a test build: the archive stays a run
+# install it goes over (ext\php_*.dll, the libraries they need beside php.exe),
+# pcov-<minor>-windows-x86_64.dll and xdebug-<minor>-windows-x86_64.dll beside
+# it (Phun loads those two on demand, so they stay out of ext\), and a
+# SHA256SUMS of all three. Untick publish for a test build: the archive stays a run
 # artifact only.
 name: php-ext-windows
 
@@ -64,6 +66,9 @@ env:
   UNIX_ONLY: "pcntl,posix,sysvmsg,sysvsem"
   # Built here, in load order (event needs the official sockets loaded first).
   BUILT: "apcu,redis,imagick,memcached,event,protobuf,opentelemetry,pcov,xdebug"
+  # Phun loads these only on demand (coverage, debugging) and loads every
+  # php_*.dll in ext\, so they are separate release assets, not in the zip.
+  ON_DEMAND: "pcov,xdebug"
   PHP_SDK_TAG: "php-sdk-2.9.0"
   PHP_SDK_COMMIT: "81b356186db123ce9cd65149cee4683211a59ebd"
 
@@ -340,15 +345,28 @@ jobs:
         run: |
           $stage = "$env:W\stage"
           $php = "$env:W\php"
-          New-Item -ItemType Directory -Force "$stage\ext", "$stage\licenses" | Out-Null
-          Copy-Item "$env:W\built\*.dll" "$stage\ext\"
+          $od = "$env:W\ondemand"
+          New-Item -ItemType Directory -Force "$stage\ext", "$stage\licenses", $od | Out-Null
+          $ondemand = $env:ON_DEMAND -split ','
+          foreach ($dll in Get-ChildItem "$env:W\built\*.dll") {
+            $n = $dll.BaseName -replace '^php_', ''
+            if ($n -in $ondemand) {
+              Copy-Item $dll.FullName "$od\$n-$env:MINOR-windows-x86_64.dll"
+            } else {
+              Copy-Item $dll.FullName "$stage\ext\"
+            }
+          }
+          foreach ($n in $ondemand) {
+            if (-not (Test-Path "$od\$n-$env:MINOR-windows-x86_64.dll")) { throw "no $n build" }
+            if (Test-Path "$stage\ext\php_$n.dll") { throw "php_$n.dll must not be in ext\" }
+          }
           $im = Get-ChildItem "$env:W\pkgs" -Directory -Filter 'ImageMagick-*' | Select-Object -First 1
           Copy-Item "$($im.FullName)\bin\*.dll" "$stage\"
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin not found" }
           $queue = [Collections.Generic.Queue[string]]::new()
-          Get-ChildItem $stage -Recurse -Filter *.dll | ForEach-Object { $queue.Enqueue($_.FullName) }
+          Get-ChildItem $stage, $od -Recurse -Filter *.dll | ForEach-Object { $queue.Enqueue($_.FullName) }
           $system = [Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
           while ($queue.Count -gt 0) {
             $f = $queue.Dequeue()
@@ -393,8 +411,10 @@ jobs:
           }
           $lines += 'extension=sockets'
           foreach ($e in $exts) {
-            if ($e.name -eq 'xdebug') { $lines += 'zend_extension=xdebug' } else { $lines += "extension=$($e.name)" }
+            if ($e.name -notin $ondemand) { $lines += "extension=$($e.name)" }
           }
+          $lines += "; pcov and Xdebug are not in this archive's ext\: they load on demand, from the release's"
+          $lines += "; pcov-$env:MINOR-windows-x86_64.dll (extension=<path>) and xdebug-$env:MINOR-windows-x86_64.dll (zend_extension=<path>)."
           $lines | Set-Content -Encoding ascii "$stage\php-ext.ini"
           Get-Content "$stage\php-ext.ini"
           Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName.Substring($stage.Length + 1) }
@@ -418,6 +438,12 @@ jobs:
             if ($code -ne 0) { throw "php $($a -join ' ') exited $code" }
             if ($out -match '(?i)warning|unable to|cannot load|fatal|error|deprecated') { throw "php $($a -join ' ') printed an error" }
             return $out
+          }
+          # pcov and Xdebug load on demand, by path, from outside ext\.
+          $pcov = "$env:W\ondemand\pcov-$env:MINOR-windows-x86_64.dll"
+          $xdebug = "$env:W\ondemand\xdebug-$env:MINOR-windows-x86_64.dll"
+          foreach ($n in $env:ON_DEMAND -split ',') {
+            if (Test-Path "$t\ext\php_$n.dll") { throw "php_$n.dll is in ext\; Phun would load it always" }
           }
           $v = (Invoke-Php @('-v'))
           $want = $env:PHP_VERSION -replace '-\d+$', ''
@@ -462,10 +488,10 @@ jobs:
           OpenTelemetry\Instrumentation\hook(null, 'f', function () use (&$n) { $n++; });
           f(); if ($n !== 1) exit(1); echo phpversion('opentelemetry'), "\n";
           '@)
-            pcov = @(@('-d', 'extension=pcov', '-d', 'pcov.enabled=1'), @'
+            pcov = @(@('-d', "extension=$pcov", '-d', 'pcov.enabled=1'), @'
           <?php \pcov\start(); $x = 1; \pcov\stop(); if (!is_array(\pcov\collect())) exit(1); echo phpversion('pcov'), "\n";
           '@)
-            xdebug = @(@('-d', 'zend_extension=xdebug', '-d', 'xdebug.mode=develop'), @'
+            xdebug = @(@('-d', "zend_extension=$xdebug", '-d', 'xdebug.mode=develop'), @'
           <?php if (!function_exists('xdebug_info') || !in_array('develop', xdebug_info('mode'))) exit(1); echo phpversion('xdebug'), "\n";
           '@)
           }
@@ -477,7 +503,7 @@ jobs:
             Invoke-Php ($checks[$n][0] + @($file)) | Out-Null
             Write-Host "::endgroup::"
           }
-          $xv = Invoke-Php @('-d', 'zend_extension=xdebug', '-v')
+          $xv = Invoke-Php @('-d', "zend_extension=$xdebug", '-v')
           if ($xv -notmatch 'with Xdebug') { throw "Xdebug did not load as a Zend extension" }
 
           # Everything together: the whole of php-build's list, less the
@@ -497,8 +523,11 @@ jobs:
             }
           }
           foreach ($n in $built) {
-            $ini += $(if ($n -eq 'xdebug') { "zend_extension=$n" } else { "extension=$n" })
-            $table += "$n`tbuilt here"
+            switch ($n) {
+              'pcov' { $ini += "extension=$pcov"; $table += "$n`tbuilt here, on demand (release asset)" }
+              'xdebug' { $ini += "zend_extension=$xdebug"; $table += "$n`tbuilt here, on demand (release asset)" }
+              default { $ini += "extension=$n"; $table += "$n`tbuilt here (zip ext\)" }
+            }
           }
           foreach ($n in $unix) { $table += "$n`tnot on Windows" }
           $ini | Set-Content -Encoding ascii "$env:W\all.ini"
@@ -527,12 +556,19 @@ jobs:
           7z a -tzip -mx=9 "$env:GITHUB_WORKSPACE\dist\$name" * | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "7z failed" }
           Pop-Location
+          $inzip = 7z l -slt "dist\$name" | Select-String '^Path = ' | ForEach-Object { $_.Line.Substring(7) }
+          foreach ($n in $env:ON_DEMAND -split ',') {
+            if ($inzip -match "php_$n\.dll$") { throw "php_$n.dll is in the zip" }
+          }
+          Copy-Item "$env:W\ondemand\*.dll" dist\
           Get-ChildItem dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: php-ext-${{ matrix.minor }}-windows-x86_64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.dll
           if-no-files-found: error
 
   publish:
@@ -560,14 +596,16 @@ jobs:
               8.6) v="${{ inputs.php86 }}" ;;
             esac
             tag="php-ext-windows-$v"
-            file="php-ext-$v-windows-x86_64.zip"
-            [ -f "$file" ] || { echo "$tag: no $file"; exit 1; }
+            files=("php-ext-$v-windows-x86_64.zip" "pcov-$m-windows-x86_64.dll" "xdebug-$m-windows-x86_64.dll")
+            for f in "${files[@]}"; do
+              [ -f "$f" ] || { echo "$tag: no $f"; exit 1; }
+            done
             if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
               echo "$tag already exists on $REPO; delete it first to rebuild"; exit 1
             fi
-            sha256sum "$file" > SHA256SUMS
+            sha256sum "${files[@]}" > SHA256SUMS
             cat SHA256SUMS
             gh release create "$tag" --repo "$REPO" --title "PHP $v extensions for Windows" \
-              --notes "PECL extensions for the official windows.php.net PHP $v NTS x64 build (apcu, redis, imagick, memcached, event, protobuf, opentelemetry, pcov, xdebug), built from source with the PHP SDK against the php.net devel pack. Unpack over the PHP install; php-ext.ini lists the load lines and versions." \
-              "$file" SHA256SUMS
+              --notes "PECL extensions for the official windows.php.net PHP $v NTS x64 build, built from source with the PHP SDK against the php.net devel pack. The zip (apcu, redis, imagick, memcached, event, protobuf, opentelemetry, and the libraries they need) unpacks over the PHP install; php-ext.ini lists the load lines and versions. pcov and Xdebug are separate files, for loading on demand." \
+              "${files[@]}" SHA256SUMS
           done

@@ -10,7 +10,7 @@ with `scripts/pin-php.sh <tag>` or `scripts/pin-services.sh <tag>`.
 | Workflow | Release tag | Platforms | Why |
 |---|---|---|---|
 | `php-build` | `php-<version>` | Linux (x86_64, aarch64), macOS (Apple Silicon, Intel) | PHP 8.4, 8.5 and 8.6, cli + fpm, built with static-php-cli so they run without system libraries |
-| `php-ext-windows` | `php-ext-windows-<version>` | Windows (x86_64) | The extensions `php-build` has that the official windows.php.net NTS zip lacks (apcu, redis, imagick, memcached, event, protobuf, opentelemetry) plus pcov and Xdebug, built with the PHP SDK for that zip; PECL publishes no PHP 8.6 Windows builds |
+| `php-ext-windows` | `php-ext-windows-<version>` | Windows (x86_64) | The extensions `php-build` has that the official windows.php.net NTS zip lacks (apcu, redis, imagick, memcached, event, protobuf, opentelemetry) in one zip, plus pcov and Xdebug as separate on-demand DLLs, built with the PHP SDK for that zip; PECL publishes no PHP 8.6 Windows builds |
 | `valkey-build` | `valkey-<version>` | macOS (Apple Silicon, Intel) | Valkey publishes Linux tarballs only |
 | `mariadb-build` | `mariadb-<version>` | macOS (Apple Silicon, Intel) | MariaDB publishes Linux and Windows only |
 | `memcached-build` | `memcached-<version>` | Linux (x86_64, aarch64), macOS (Apple Silicon, Intel) | memcached.org publishes source only |
