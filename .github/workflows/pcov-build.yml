@@ -19,9 +19,6 @@
 name: pcov-build
 
 on:
-  # TEMPORARY: registers the workflow from this branch.
-  push:
-    branches: [pcov-build]
   workflow_dispatch:
     inputs:
       php84:
@@ -65,7 +62,6 @@ env:
 
 jobs:
   plan:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     outputs:
       minors: ${{ steps.minors.outputs.minors }}
